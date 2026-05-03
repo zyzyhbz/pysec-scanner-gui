@@ -290,11 +290,14 @@ class ModernScannerGUI:
 
         self.module_vars = {}
         modules = [
-            ('portscan', '🔌 端口扫描'),
+            ('port_scan', '🔌 端口扫描'),
             ('subdomain', '🌐 子域名枚举'),
-            ('dirscan', '📁 目录扫描'),
-            ('vulnscan', '🛡️ 漏洞扫描'),
+            ('dir_scan', '📁 目录扫描'),
             ('fingerprint', '👆 指纹识别'),
+            ('sqli', '💉 SQL 注入'),
+            ('xss', '❌ XSS 漏洞'),
+            ('ssrf', '🔄 SSRF 漏洞'),
+            ('sensitive', '🔍 敏感信息'),
         ]
         for idx, (key, label) in enumerate(modules):
             var = tk.BooleanVar(value=True)

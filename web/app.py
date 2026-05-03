@@ -350,6 +350,18 @@ async def search_findings(
     }
 
 
+# 模块中文映射表
+_MODULE_NAMES = {
+    'port_scan': '🔌 端口扫描',
+    'subdomain': '🌐 子域名枚举',
+    'dir_scan': '📁 目录扫描',
+    'fingerprint': '👆 指纹识别',
+    'sqli': '💉 SQL 注入',
+    'xss': '❌ XSS 漏洞',
+    'ssrf': '🔄 SSRF 漏洞',
+    'sensitive': '🔍 敏感信息',
+}
+
 @app.get("/api/modules")
 async def list_modules():
     """获取可用模块列表"""
@@ -361,7 +373,7 @@ async def list_modules():
         if info:
             modules.append({
                 "name": name,
-                "display_name": info['name'],
+                "display_name": _MODULE_NAMES.get(name, info['name']),
                 "description": info['description'],
                 "version": info['version']
             })

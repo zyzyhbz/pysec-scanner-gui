@@ -2,16 +2,11 @@
 """
 PySecScanner 启动器
 
-⚠️ 注意: 这是可选的启动器
-- 如需直接启动GUI,请使用: python -m gui
-- 如需使用命令行,请使用: python main.py [命令]
-- 此文件仅用于简化启动流程
-
-自动检测并启动GUI或命令行模式
+自动启动现代化 GUI 界面
+如需使用命令行,请使用: python main.py [命令]
 """
 
 import sys
-import os
 
 def main():
     """主入口"""
@@ -20,12 +15,12 @@ def main():
         from main import cli
         cli()
     else:
-        # 尝试启动GUI
+        # 启动现代化 GUI
         try:
-            from gui.app import main as gui_main
+            from gui.modern_gui import main as gui_main
             gui_main()
         except ImportError as e:
-            print(f"无法启动GUI: {e}")
+            print(f"无法启动 GUI: {e}")
             print("请确保已安装 tkinter")
             print("\n使用命令行模式:")
             print("  python main.py --help")

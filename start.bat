@@ -3,34 +3,14 @@ chcp 65001 >nul
 cls
 echo.
 echo   ========================================
-echo   PySecScanner - Security Scanner v2.0
+echo   PySecScanner - 安全扫描工具 v2.0
 echo   ========================================
 echo.
-echo   Select interface:
+echo   正在启动现代化 GUI 界面...
 echo.
-echo      [1] Modern GUI  [recommended]
-echo      [2] Classic GUI
-echo.
-set /p choice="   Enter 1 or 2: "
 
-if "%choice%"=="2" goto classic
-goto modern
-
-:modern
-echo.
-echo   Launching Modern GUI...
-echo.
 set GUI_SCRIPT=gui\modern_gui.py
-goto launch
 
-:classic
-echo.
-echo   Launching Classic GUI...
-echo.
-set GUI_SCRIPT=gui\app.py
-goto launch
-
-:launch
 where python >nul 2>&1
 if %errorlevel% equ 0 (
     python %GUI_SCRIPT%
@@ -44,8 +24,8 @@ if %errorlevel% equ 0 (
 )
 
 echo.
-echo   [Error] Python not found!
-echo   Please install Python and add it to PATH.
+echo   [错误] 未找到 Python！
+echo   请安装 Python 并将其添加到 PATH 环境变量中。
 echo   https://www.python.org/downloads/
 echo.
 pause
@@ -54,7 +34,7 @@ exit /b 1
 :end
 if %errorlevel% neq 0 (
     echo.
-    echo   [Error] Launch failed.
+    echo   [错误] 启动失败。
     echo.
     pause
 )
