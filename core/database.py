@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from pathlib import Path
 import threading
 
+from core.logger import logger
+
 
 @dataclass
 class ScanRecord:
@@ -83,10 +85,11 @@ class Database:
         conn = self._get_connection()
         cursor = conn.cursor()
         
-        # 扫描记录表
+        # 扫描记录表（带用户关联）
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS scans (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER DEFAULT 1,
                 target TEXT NOT NULL,
                 start_time TIMESTAMP NOT NULL,
                 end_time TIMESTAMP,
@@ -95,7 +98,8 @@ class Database:
                 modules TEXT,
                 total_findings INTEGER DEFAULT 0,
                 severity_distribution TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(id)
             )
         ''')
         
@@ -116,23 +120,59 @@ class Database:
             )
         ''')
         
+        # 检查并添加user_id列（兼容旧数据库）
+        try:
+            cursor.execute('SELECT user_id FROM scans LIMIT 1')
+        except sqlite3.OperationalError:
+            # 旧数据库需要迁移
+            cursor.execute('ALTER TABLE scans ADD COLUMN user_id INTEGER DEFAULT 1')
+            logger.info("已为scans表添加user_id列")
+        
+        # 用户表
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT UNIQUE NOT NULL,
+                password_hash TEXT NOT NULL,
+                is_admin INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
         # 创建索引
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_scans_target ON scans(target)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_findings_scan_id ON findings(scan_id)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_findings_severity ON findings(severity)')
         
+        # 创建默认用户LHY（如果不存在）
+        cursor.execute('SELECT COUNT(*) FROM users WHERE username = ?', ('LHY',))
+        if cursor.fetchone()[0] == 0:
+            import hashlib
+            import secrets
+            salt = secrets.token_hex(16)
+            pwdhash = hashlib.sha256(('lhy123456' + salt).encode()).hexdigest()
+            password_hash = f"{salt}${pwdhash}"
+            cursor.execute('''
+                INSERT INTO users (username, password_hash, is_admin)
+                VALUES (?, ?, 1)
+            ''', ('LHY', password_hash))
+            logger.info("已创建默认用户 LHY")
+        
+        # 将现有扫描数据关联到LHY用户（user_id为NULL时）
+        cursor.execute('UPDATE scans SET user_id = 1 WHERE user_id IS NULL')
+        
         conn.commit()
         conn.close()
+        conn.close()
     
-    def create_scan(self, target: str, modules: List[str]) -> int:
+    def create_scan(self, target: str, modules: List[str], user_id: int = 1) -> int:
         """创建新的扫描记录"""
         conn = self._get_connection()
         cursor = conn.cursor()
         
         cursor.execute('''
-            INSERT INTO scans (target, start_time, modules, status)
-            VALUES (?, ?, ?, ?)
-        ''', (target, datetime.now(), json.dumps(modules), 'running'))
+            INSERT INTO scans (user_id, target, start_time, modules, status)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (user_id, target, datetime.now(), json.dumps(modules), 'running'))
         
         scan_id = cursor.lastrowid
         conn.commit()
@@ -228,14 +268,19 @@ class Database:
             )
         return None
     
-    def get_scans(self, limit: int = 50, offset: int = 0) -> List[ScanRecord]:
-        """获取扫描记录列表"""
+    def get_scans(self, limit: int = 50, offset: int = 0, user_id: int = None) -> List[ScanRecord]:
+        """获取扫描记录列表（可按用户过滤）"""
         conn = self._get_connection()
         cursor = conn.cursor()
         
-        cursor.execute('''
-            SELECT * FROM scans ORDER BY start_time DESC LIMIT ? OFFSET ?
-        ''', (limit, offset))
+        if user_id:
+            cursor.execute('''
+                SELECT * FROM scans WHERE user_id = ? ORDER BY start_time DESC LIMIT ? OFFSET ?
+            ''', (user_id, limit, offset))
+        else:
+            cursor.execute('''
+                SELECT * FROM scans ORDER BY start_time DESC LIMIT ? OFFSET ?
+            ''', (limit, offset))
         
         rows = cursor.fetchall()
         conn.close()
@@ -283,33 +328,61 @@ class Database:
             raw_data=row['raw_data']
         ) for row in rows]
     
-    def get_stats(self) -> Dict[str, Any]:
-        """获取统计信息"""
+    def get_stats(self, user_id: int = None) -> Dict[str, Any]:
+        """获取统计信息（可按用户过滤）"""
         conn = self._get_connection()
         cursor = conn.cursor()
         
-        # 总扫描数
-        cursor.execute('SELECT COUNT(*) as count FROM scans')
-        total_scans = cursor.fetchone()['count']
-        
-        # 总发现数
-        cursor.execute('SELECT COUNT(*) as count FROM findings')
-        total_findings = cursor.fetchone()['count']
-        
-        # 按严重程度统计
-        cursor.execute('''
-            SELECT severity, COUNT(*) as count 
-            FROM findings 
-            GROUP BY severity
-        ''')
-        severity_stats = {row['severity']: row['count'] for row in cursor.fetchall()}
-        
-        # 最近7天扫描数
-        cursor.execute('''
-            SELECT COUNT(*) as count FROM scans 
-            WHERE start_time >= datetime('now', '-7 days')
-        ''')
-        recent_scans = cursor.fetchone()['count']
+        if user_id:
+            # 总扫描数（按用户）
+            cursor.execute('SELECT COUNT(*) as count FROM scans WHERE user_id = ?', (user_id,))
+            total_scans = cursor.fetchone()['count']
+            
+            # 总发现数（按用户的扫描）
+            cursor.execute('''
+                SELECT COUNT(*) as count FROM findings
+                WHERE scan_id IN (SELECT id FROM scans WHERE user_id = ?)
+            ''', (user_id,))
+            total_findings = cursor.fetchone()['count']
+            
+            # 按严重程度统计（按用户的扫描）
+            cursor.execute('''
+                SELECT severity, COUNT(*) as count
+                FROM findings
+                WHERE scan_id IN (SELECT id FROM scans WHERE user_id = ?)
+                GROUP BY severity
+            ''', (user_id,))
+            severity_stats = {row['severity']: row['count'] for row in cursor.fetchall()}
+            
+            # 最近7天扫描数（按用户）
+            cursor.execute('''
+                SELECT COUNT(*) as count FROM scans
+                WHERE user_id = ? AND start_time >= datetime('now', '-7 days')
+            ''', (user_id,))
+            recent_scans = cursor.fetchone()['count']
+        else:
+            # 总扫描数
+            cursor.execute('SELECT COUNT(*) as count FROM scans')
+            total_scans = cursor.fetchone()['count']
+            
+            # 总发现数
+            cursor.execute('SELECT COUNT(*) as count FROM findings')
+            total_findings = cursor.fetchone()['count']
+            
+            # 按严重程度统计
+            cursor.execute('''
+                SELECT severity, COUNT(*) as count
+                FROM findings
+                GROUP BY severity
+            ''')
+            severity_stats = {row['severity']: row['count'] for row in cursor.fetchall()}
+            
+            # 最近7天扫描数
+            cursor.execute('''
+                SELECT COUNT(*) as count FROM scans
+                WHERE start_time >= datetime('now', '-7 days')
+            ''')
+            recent_scans = cursor.fetchone()['count']
         
         conn.close()
         
@@ -371,6 +444,83 @@ class Database:
             evidence=row['evidence'],
             raw_data=row['raw_data']
         ) for row in rows]
+    
+    # ==================== 用户管理 ====================
+    
+    def create_user(self, username: str, password_hash: str) -> bool:
+        """创建用户"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute('''
+                INSERT INTO users (username, password_hash)
+                VALUES (?, ?)
+            ''', (username, password_hash))
+            conn.commit()
+            return True
+        except sqlite3.IntegrityError:
+            return False
+        finally:
+            conn.close()
+    
+    def get_user(self, username: str) -> Optional[Dict[str, Any]]:
+        """获取用户信息"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT id, username, password_hash, is_admin, created_at
+            FROM users WHERE username = ?
+        ''', (username,))
+        row = cursor.fetchone()
+        conn.close()
+        
+        if row:
+            return {
+                'id': row['id'],
+                'username': row['username'],
+                'password_hash': row['password_hash'],
+                'is_admin': bool(row['is_admin']),
+                'created_at': row['created_at']
+            }
+        return None
+    
+    def get_user_by_id(self, user_id: int) -> Optional[Dict[str, Any]]:
+        """根据ID获取用户信息"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT id, username, is_admin, created_at
+            FROM users WHERE id = ?
+        ''', (user_id,))
+        row = cursor.fetchone()
+        conn.close()
+        
+        if row:
+            return {
+                'id': row['id'],
+                'username': row['username'],
+                'is_admin': bool(row['is_admin']),
+                'created_at': row['created_at']
+            }
+        return None
+    
+    def user_exists(self, username: str) -> bool:
+        """检查用户是否存在"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT 1 FROM users WHERE username = ?', (username,))
+        result = cursor.fetchone() is not None
+        conn.close()
+        return result
+    
+    def get_user_count(self) -> int:
+        """获取用户总数"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT COUNT(*) as count FROM users')
+        result = cursor.fetchone()
+        conn.close()
+        return result['count'] if result else 0
 
 
 # 全局数据库实例

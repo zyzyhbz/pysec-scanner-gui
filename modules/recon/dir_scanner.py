@@ -23,6 +23,7 @@ class DirectoryInfo:
     content_type: str = ""
     redirect_url: str = ""
     title: str = ""
+    response_snippet: str = ""
 
 
 # 常见目录字典
@@ -113,7 +114,18 @@ class DirScanner(BaseModule):
         results = []
         for dir_info in self.found_paths:
             severity = self._get_severity(dir_info.status_code)
-            
+            raw_data = {
+                "vulnerability_type": "exposed_path",
+                "url": dir_info.url,
+                "method": "GET",
+                "path": dir_info.path,
+                "status_code": dir_info.status_code,
+                "content_length": dir_info.content_length,
+                "content_type": dir_info.content_type,
+                "redirect_url": dir_info.redirect_url,
+                "title": dir_info.title,
+                "response_snippet": dir_info.response_snippet,
+            }
             result = ScanResult(
                 result_type=ResultType.DIRECTORY,
                 title=f"发现路径: {dir_info.path} [{dir_info.status_code}]",
@@ -121,7 +133,7 @@ class DirScanner(BaseModule):
                 severity=severity,
                 target=dir_info.url,
                 evidence=f"状态码: {dir_info.status_code}\n大小: {dir_info.content_length} bytes\n类型: {dir_info.content_type}\n重定向: {dir_info.redirect_url or 'N/A'}",
-                raw_data=dir_info.__dict__
+                raw_data=raw_data
             )
             results.append(result)
             self.add_result(result)
@@ -201,12 +213,14 @@ class DirScanner(BaseModule):
                                 content_length = int(response.headers.get('Content-Length', 0))
                                 content_type = response.headers.get('Content-Type', '')
                                 redirect_url = response.headers.get('Location', '')
+                                snippet = ""
                                 
                                 # 获取页面标题
                                 title = ""
                                 if 'text/html' in content_type:
                                     try:
                                         text = await response.text()
+                                        snippet = text[:500]
                                         import re
                                         match = re.search(r'<title>(.*?)</title>', text, re.IGNORECASE | re.DOTALL)
                                         if match:
@@ -221,7 +235,8 @@ class DirScanner(BaseModule):
                                     content_length=content_length,
                                     content_type=content_type,
                                     redirect_url=redirect_url,
-                                    title=title
+                                    title=title,
+                                    response_snippet=snippet
                                 )
                                 
                 except asyncio.TimeoutError:

@@ -12,6 +12,7 @@ from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 
 from core.base import BaseModule, ScanResult, Severity, ResultType
 from core.logger import Logger
+from core.http_evidence import fetch_evidence, compare_evidence
 
 
 @dataclass
@@ -21,6 +22,11 @@ class InjectionPoint:
     injection_type: str  # GET, POST, Header, Cookie
     payload: str
     evidence: str
+    test_url: str = ""
+    status_code: int = 0
+    elapsed_ms: float = 0.0
+    matched_pattern: str = ""
+    response_snippet: str = ""
 
 
 # SQL注入测试Payload
@@ -131,6 +137,22 @@ class SQLInjectionScanner(BaseModule):
         # 生成结果
         results = []
         for injection in self.injection_points:
+            raw_data = {
+                "vulnerability_type": "sql_injection",
+                "url": self.base_url,
+                "method": "GET",
+                "param": injection.parameter,
+                "injection_point": injection.parameter,
+                "injection_type": injection.injection_type,
+                "payload": injection.payload,
+                "evidence": injection.evidence,
+                "test_url": injection.test_url,
+                "status_code": injection.status_code,
+                "elapsed_ms": injection.elapsed_ms,
+                "matched_pattern": injection.matched_pattern,
+                "response_snippet": injection.response_snippet,
+                "details": injection.__dict__,
+            }
             result = ScanResult(
                 result_type=ResultType.VULNERABILITY,
                 title=f"SQL注入漏洞: {injection.parameter}",
@@ -138,7 +160,7 @@ class SQLInjectionScanner(BaseModule):
                 severity=Severity.HIGH,
                 target=self.base_url,
                 evidence=f"参数: {injection.parameter}\nPayload: {injection.payload}\n证据: {injection.evidence}",
-                raw_data=injection.__dict__
+                raw_data=raw_data
             )
             results.append(result)
             self.add_result(result)
@@ -184,68 +206,71 @@ class SQLInjectionScanner(BaseModule):
         
         async def test_param(param_name: str, original_value: str) -> Optional[InjectionPoint]:
             async with semaphore:
-                for payload, inj_type, pattern in self.payloads:
-                    test_key = f"{param_name}:{payload}"
-                    if test_key in tested:
-                        continue
-                    tested.add(test_key)
-                    
-                    # 构造测试URL
-                    test_params = params.copy()
-                    test_params[param_name] = original_value + payload
-                    test_url = self._build_url(test_params)
-                    
-                    try:
-                        start_time = asyncio.get_event_loop().time()
+                # baseline
+                baseline_params = params.copy()
+                baseline_params[param_name] = original_value
+                baseline_url = self._build_url(baseline_params)
+
+                async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+                    baseline_ev = await fetch_evidence(session, baseline_url, method="GET", allow_redirects=False, timeout=timeout, body_limit=800)
+
+                    for payload, inj_type, pattern in self.payloads:
+                        test_key = f"{param_name}:{payload}"
+                        if test_key in tested:
+                            continue
+                        tested.add(test_key)
                         
-                        async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
-                            async with session.get(test_url) as response:
-                                content = await response.text()
-                                elapsed = asyncio.get_event_loop().time() - start_time
-                                
-                                # 时间盲注检测
-                                if inj_type == "time" and elapsed >= 2.5:
-                                    self.logger.highlight(f"时间盲注: {param_name}")
-                                    return InjectionPoint(
-                                        parameter=param_name,
-                                        injection_type="time-based blind",
-                                        payload=payload,
-                                        evidence=f"响应时间: {elapsed:.2f}秒"
-                                    )
-                                
-                                # 错误注入检测
-                                if inj_type == "error" and pattern:
-                                    if re.search(pattern, content, re.IGNORECASE):
-                                        self.logger.highlight(f"错误注入: {param_name}")
-                                        return InjectionPoint(
-                                            parameter=param_name,
-                                            injection_type="error-based",
-                                            payload=payload,
-                                            evidence=f"检测到SQL错误信息"
-                                        )
-                                
-                                # 检查SQL错误模式
-                                for error_pattern in SQL_ERROR_PATTERNS:
-                                    if re.search(error_pattern, content, re.IGNORECASE):
-                                        self.logger.highlight(f"SQL错误: {param_name}")
-                                        return InjectionPoint(
-                                            parameter=param_name,
-                                            injection_type="error-based",
-                                            payload=payload,
-                                            evidence=f"匹配模式: {error_pattern}"
-                                        )
-                                        
-                    except asyncio.TimeoutError:
-                        # 超时可能是时间盲注
-                        if inj_type == "time":
+                        test_params = params.copy()
+                        test_params[param_name] = original_value + payload
+                        test_url = self._build_url(test_params)
+
+                        exploit_ev = await fetch_evidence(session, test_url, method="GET", allow_redirects=False, timeout=timeout, body_limit=800)
+                        comp = compare_evidence(baseline_ev, exploit_ev)
+                        content = exploit_ev.get("body_snippet", "")
+
+                        # 时间盲注检测（利用对比更稳）
+                        if inj_type == "time" and comp.get("elapsed_ms_delta", 0) >= 2500:
+                            self.logger.highlight(f"时间盲注: {param_name}")
                             return InjectionPoint(
                                 parameter=param_name,
                                 injection_type="time-based blind",
                                 payload=payload,
-                                evidence="请求超时，可能存在时间盲注"
+                                evidence=f"响应耗时显著增加: +{comp.get('elapsed_ms_delta')}ms",
+                                test_url=test_url,
+                                status_code=exploit_ev.get("status") or 0,
+                                elapsed_ms=float(exploit_ev.get("elapsed_ms") or 0.0),
+                                response_snippet=content
                             )
-                    except Exception as e:
-                        pass
+                        
+                        # 错误注入检测
+                        if inj_type == "error" and pattern and re.search(pattern, content, re.IGNORECASE):
+                            self.logger.highlight(f"错误注入: {param_name}")
+                            return InjectionPoint(
+                                parameter=param_name,
+                                injection_type="error-based",
+                                payload=payload,
+                                evidence=f"检测到SQL错误特征: {pattern}",
+                                test_url=test_url,
+                                status_code=exploit_ev.get("status") or 0,
+                                elapsed_ms=float(exploit_ev.get("elapsed_ms") or 0.0),
+                                matched_pattern=pattern,
+                                response_snippet=content
+                            )
+                        
+                        for error_pattern in SQL_ERROR_PATTERNS:
+                            if re.search(error_pattern, content, re.IGNORECASE):
+                                self.logger.highlight(f"SQL错误: {param_name}")
+                                return InjectionPoint(
+                                    parameter=param_name,
+                                    injection_type="error-based",
+                                    payload=payload,
+                                    evidence=f"匹配SQL错误模式: {error_pattern}",
+                                    test_url=test_url,
+                                    status_code=exploit_ev.get("status") or 0,
+                                    elapsed_ms=float(exploit_ev.get("elapsed_ms") or 0.0),
+                                    matched_pattern=error_pattern,
+                                    response_snippet=content
+                                )
                 
                 return None
         

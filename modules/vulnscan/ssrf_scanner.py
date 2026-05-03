@@ -12,6 +12,7 @@ from urllib.parse import urlparse, urlencode
 
 from core.base import BaseModule, ScanResult, Severity, ResultType
 from core.logger import Logger
+from core.http_evidence import fetch_evidence, compare_evidence
 
 
 @dataclass
@@ -21,6 +22,9 @@ class SSRFPoint:
     injection_type: str
     payload: str
     evidence: str
+    test_url: str = ""
+    status_code: int = 0
+    response_snippet: str = ""
 
 
 # SSRF测试Payload
@@ -84,7 +88,7 @@ class SSRFScanner(BaseModule):
         self.timeout = 15
         self.concurrency = 5
         self.payloads = SSRF_PAYLOADS
-        self.ssrF_points: List[SSRFPoint] = []
+        self.ssrf_points: List[SSRFPoint] = []
         self.base_url = ""
     
     async def scan(self, target: str) -> List[ScanResult]:
@@ -115,6 +119,17 @@ class SSRFScanner(BaseModule):
         # 生成结果
         results = []
         for ssrf in self.ssrf_points:
+            raw_data = {
+                "vulnerability_type": "ssrf",
+                "url": self.base_url,
+                "method": "GET",
+                "param": ssrf.parameter,
+                "injection_point": ssrf.parameter,
+                "payload": ssrf.payload,
+                "ssrf_type": ssrf.injection_type,
+                "evidence": ssrf.evidence,
+                "details": ssrf.__dict__,
+            }
             result = ScanResult(
                 result_type=ResultType.VULNERABILITY,
                 title=f"SSRF漏洞: {ssrf.parameter}",
@@ -122,7 +137,7 @@ class SSRFScanner(BaseModule):
                 severity=Severity.HIGH,
                 target=self.base_url,
                 evidence=f"参数: {ssrf.parameter}\nPayload: {ssrf.payload}\n证据: {ssrf.evidence}",
-                raw_data=ssrf.__dict__
+                raw_data=raw_data
             )
             results.append(result)
             self.add_result(result)
@@ -167,6 +182,10 @@ class SSRFScanner(BaseModule):
         
         async def test_param(param_name: str, original_value: str) -> Optional[SSRFPoint]:
             async with semaphore:
+                baseline_params = params.copy()
+                baseline_params[param_name] = original_value
+                baseline_url = self._build_url(baseline_params)
+
                 for payload, inj_type in self.payloads:
                     test_key = f"{param_name}:{payload[:30]}"
                     if test_key in tested:
@@ -180,22 +199,26 @@ class SSRFScanner(BaseModule):
                     
                     try:
                         async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
-                            async with session.get(test_url) as response:
-                                content = await response.text()
-                                
-                                # 检查SSRF特征
-                                for pattern in SSRF_INDICATORS:
-                                    if re.search(pattern, content, re.IGNORECASE):
-                                        return SSRFPoint(
-                                            parameter=param_name,
-                                            injection_type=inj_type,
-                                            payload=payload,
-                                            evidence=f"匹配模式: {pattern}"
-                                        )
-                                
-                                # 检查响应差异
-                                # 如果响应与正常请求差异很大，可能存在SSRF
-                                
+                            baseline_ev = await fetch_evidence(session, baseline_url, method="GET", allow_redirects=False, timeout=timeout, body_limit=800)
+                            exploit_ev = await fetch_evidence(session, test_url, method="GET", allow_redirects=False, timeout=timeout, body_limit=800)
+                            comp = compare_evidence(baseline_ev, exploit_ev)
+                            content = exploit_ev.get("body_snippet", "")
+                            snippet = content[:500]
+                            
+                            # 检查SSRF特征
+                            for pattern in SSRF_INDICATORS:
+                                if re.search(pattern, content, re.IGNORECASE):
+                                    return SSRFPoint(
+                                        parameter=param_name,
+                                        injection_type=inj_type,
+                                        payload=payload,
+                                        evidence=f"匹配模式: {pattern}; hash_changed={comp.get('body_hash_changed')}",
+                                        test_url=test_url,
+                                        status_code=exploit_ev.get("status") or 0,
+                                        response_snippet=snippet
+                                    )
+                            
+                            # 检查响应差异（后续可扩展更强的差异判定）
                     except asyncio.TimeoutError:
                         # 超时可能表示请求被发送到内网
                         if "127.0.0.1" in payload or "localhost" in payload:

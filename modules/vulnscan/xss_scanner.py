@@ -12,6 +12,7 @@ from urllib.parse import urlparse, parse_qs, urlencode, urlunparse, quote
 
 from core.base import BaseModule, ScanResult, Severity, ResultType
 from core.logger import Logger
+from core.http_evidence import fetch_evidence, compare_evidence
 
 
 @dataclass
@@ -22,6 +23,9 @@ class XSSPoint:
     payload: str
     evidence: str
     context: str  # html, attribute, script, url
+    test_url: str = ""
+    status_code: int = 0
+    response_snippet: str = ""
 
 
 # XSS测试Payload
@@ -143,6 +147,18 @@ class XSSScanner(BaseModule):
         # 生成结果
         results = []
         for xss in self.xss_points:
+            raw_data = {
+                "vulnerability_type": "xss",
+                "url": self.base_url,
+                "method": "GET",
+                "param": xss.parameter,
+                "injection_point": xss.parameter,
+                "payload": xss.payload,
+                "payload_type": xss.injection_type,
+                "context": xss.context,
+                "evidence": xss.evidence,
+                "details": xss.__dict__,
+            }
             result = ScanResult(
                 result_type=ResultType.VULNERABILITY,
                 title=f"XSS漏洞: {xss.parameter}",
@@ -150,7 +166,7 @@ class XSSScanner(BaseModule):
                 severity=Severity.MEDIUM,
                 target=self.base_url,
                 evidence=f"参数: {xss.parameter}\nPayload: {xss.payload}\n证据: {xss.evidence}",
-                raw_data=xss.__dict__
+                raw_data=raw_data
             )
             results.append(result)
             self.add_result(result)
@@ -196,53 +212,58 @@ class XSSScanner(BaseModule):
         
         async def test_param(param_name: str, original_value: str) -> Optional[XSSPoint]:
             async with semaphore:
-                for payload, context in self.payloads:
-                    test_key = f"{param_name}:{payload[:20]}"
-                    if test_key in tested:
-                        continue
-                    tested.add(test_key)
-                    
-                    # 构造测试URL
-                    test_params = params.copy()
-                    test_params[param_name] = payload
-                    test_url = self._build_url(test_params)
-                    
-                    try:
-                        async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
-                            async with session.get(test_url) as response:
-                                content = await response.text()
-                                
-                                # 检查payload是否被反射
-                                if payload in content:
-                                    self.logger.highlight(f"XSS反射: {param_name}")
+                baseline_params = params.copy()
+                baseline_params[param_name] = original_value
+                baseline_url = self._build_url(baseline_params)
+
+                async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+                    baseline_ev = await fetch_evidence(session, baseline_url, method="GET", allow_redirects=False, timeout=timeout, body_limit=800)
+
+                    for payload, context in self.payloads:
+                        test_key = f"{param_name}:{payload[:20]}"
+                        if test_key in tested:
+                            continue
+                        tested.add(test_key)
+                        
+                        test_params = params.copy()
+                        test_params[param_name] = payload
+                        test_url = self._build_url(test_params)
+
+                        exploit_ev = await fetch_evidence(session, test_url, method="GET", allow_redirects=False, timeout=timeout, body_limit=800)
+                        comp = compare_evidence(baseline_ev, exploit_ev)
+                        content = exploit_ev.get("body_snippet", "")
+
+                        # 检查payload是否被反射（对比变化可用于解释）
+                        if payload in content:
+                            self.logger.highlight(f"XSS反射: {param_name}")
+                            return XSSPoint(
+                                parameter=param_name,
+                                injection_type="reflected",
+                                payload=payload,
+                                evidence=f"Payload被反射；hash_changed={comp.get('body_hash_changed')}",
+                                context=context,
+                                test_url=test_url,
+                                status_code=exploit_ev.get("status") or 0,
+                                response_snippet=content
+                            )
+                        
+                        for pattern in XSS_MARKERS:
+                            if re.search(pattern, content, re.IGNORECASE):
+                                if param_name in content or "alert" in content:
+                                    self.logger.highlight(f"XSS模式匹配: {param_name}")
                                     return XSSPoint(
                                         parameter=param_name,
                                         injection_type="reflected",
                                         payload=payload,
-                                        evidence=f"Payload被原样反射到响应中",
-                                        context=context
+                                        evidence=f"匹配模式: {pattern}; hash_changed={comp.get('body_hash_changed')}",
+                                        context=context,
+                                        test_url=test_url,
+                                        status_code=exploit_ev.get("status") or 0,
+                                        response_snippet=content
                                     )
-                                
-                                # 检查XSS标记
-                                for pattern in XSS_MARKERS:
-                                    if re.search(pattern, content, re.IGNORECASE):
-                                        # 确认是我们注入的
-                                        if param_name in content or "alert" in content:
-                                            self.logger.highlight(f"XSS模式匹配: {param_name}")
-                                            return XSSPoint(
-                                                parameter=param_name,
-                                                injection_type="reflected",
-                                                payload=payload,
-                                                evidence=f"匹配模式: {pattern}",
-                                                context=context
-                                            )
-                                
-                                # 检查部分反射（可能被过滤）
-                                if self._check_partial_reflection(payload, content):
-                                    self.logger.info(f"可能存在过滤绕过: {param_name}")
-                                            
-                    except Exception as e:
-                        pass
+                        
+                        if self._check_partial_reflection(payload, content):
+                            self.logger.info(f"可能存在过滤绕过: {param_name}")
                 
                 return None
         

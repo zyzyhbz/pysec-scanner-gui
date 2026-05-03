@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 """
 PySecScanner 启动器
+
+⚠️ 注意: 这是可选的启动器
+- 如需直接启动GUI,请使用: python -m gui
+- 如需使用命令行,请使用: python main.py [命令]
+- 此文件仅用于简化启动流程
+
 自动检测并启动GUI或命令行模式
 """
 

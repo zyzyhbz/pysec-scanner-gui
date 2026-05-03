@@ -277,7 +277,23 @@ class FingerprintScanner(BaseModule):
                 severity=Severity.INFO,
                 target=self.base_url,
                 evidence="\n".join([f"{f.name} {f.version} (置信度: {f.confidence}%)\n  证据: {f.evidence}" for f in fps]),
-                raw_data={'category': category, 'fingerprints': [{'name': f.name, 'version': f.version, 'confidence': f.confidence} for f in fps]}
+                raw_data={
+                    "vulnerability_type": "fingerprint",
+                    "url": self.base_url,
+                    "method": "GET",
+                    "category": category,
+                    "fingerprints": [
+                        {
+                            "name": f.name,
+                            "version": f.version,
+                            "confidence": f.confidence,
+                            "evidence": f.evidence,
+                        }
+                        for f in fps
+                    ],
+                    "headers_sample": {k: v for k, v in (headers or {}).items() if str(k).lower() in {"server", "x-powered-by", "set-cookie", "content-type"}},
+                    "html_snippet": (html or "")[:800],
+                }
             )
             results.append(result)
             self.add_result(result)
