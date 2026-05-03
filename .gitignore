@@ -8,11 +8,12 @@ __pycache__/
 # Virtual environments
 venv/
 env/
+.env
+
 .venv/
 ENV/
 env.bak/
 venv.bak/
-
 # PyInstaller 构建文件（核心！必须排除！）
 build/
 dist/

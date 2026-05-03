@@ -70,6 +70,30 @@ class ReportConfig:
     severity_levels: List[str] = field(default_factory=lambda: ["critical", "high", "medium", "low", "info"])
 
 
+@dataclass
+class AIServiceConfig:
+    """AI服务配置（任务16）"""
+    provider: str = "mock"  # mock, openai, anthropic
+    endpoint: Optional[str] = None
+    api_key: Optional[str] = None
+    model: str = ""
+    max_retries: int = 3
+    retry_delay: float = 1.0
+    timeout: float = 30.0
+
+
+@dataclass
+class AIConfig:
+    """AI分析功能主配置（任务16）"""
+    enable_ai: bool = False  # 启用AI分析
+    enable_fix_suggestion: bool = False  # 启用修复建议生成
+    analysis_mode: str = "batch"  # real-time, batch, on-demand
+    max_concurrent_analysis: int = 5
+    service: AIServiceConfig = field(default_factory=AIServiceConfig)
+    cache_results: bool = True
+    cache_ttl: int = 3600  # 缓存时间（秒）
+
+
 class Config:
     """
     配置管理器
@@ -86,6 +110,7 @@ class Config:
         self.dir_scan = DirScanConfig()
         self.vuln_scan = VulnScanConfig()
         self.report = ReportConfig()
+        self.ai = AIConfig()
         
         self._load_config()
     
@@ -136,6 +161,17 @@ class Config:
             for key, value in config_data['report'].items():
                 if hasattr(self.report, key):
                     setattr(self.report, key, value)
+        
+        # AI配置（任务16）
+        if 'ai' in config_data:
+            for key, value in config_data['ai'].items():
+                if hasattr(self.ai, key):
+                    setattr(self.ai, key, value)
+            # AI服务配置
+            if 'service' in config_data['ai']:
+                for key, value in config_data['ai']['service'].items():
+                    if hasattr(self.ai.service, key):
+                        setattr(self.ai.service, key, value)
     
     def save_config(self, filepath: Optional[str] = None) -> None:
         """保存当前配置到文件"""
@@ -147,6 +183,7 @@ class Config:
             'dir_scan': self.dir_scan.__dict__,
             'vuln_scan': self.vuln_scan.__dict__,
             'report': self.report.__dict__,
+            'ai': self.ai.__dict__,
         }
         
         with open(filepath, 'w', encoding='utf-8') as f:
@@ -172,6 +209,7 @@ class Config:
             'dir_scan': self.dir_scan.__dict__,
             'vuln_scan': self.vuln_scan.__dict__,
             'report': self.report.__dict__,
+            'ai': self.ai.__dict__,
         }
     
     def __repr__(self) -> str:

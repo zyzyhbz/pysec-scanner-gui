@@ -114,8 +114,23 @@ class BaseModule(ABC):
         """扫描后清理工作"""
         self._end_time = time.time()
     
+    def on_result_added(self, result: ScanResult) -> ScanResult:
+        """
+        结果添加时的钩子方法（任务17）
+        
+        可用于在结果添加到结果列表时进行处理，如触发AI分析
+        
+        Args:
+            result: 新添加的扫描结果
+            
+        Returns:
+            可选地返回修改后的结果（默认返回原结果）
+        """
+        return result
+    
     def add_result(self, result: ScanResult) -> None:
         """添加扫描结果"""
+        result = self.on_result_added(result)
         self.results.append(result)
     
     def get_results(self) -> List[ScanResult]:

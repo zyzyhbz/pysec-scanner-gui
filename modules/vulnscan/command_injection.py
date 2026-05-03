@@ -12,6 +12,7 @@ from urllib.parse import urlencode, urlparse, parse_qs, urlunparse
 
 from core.base import BaseModule, ScanResult, Severity, ResultType
 from core.logger import Logger
+from core.http_evidence import fetch_evidence, compare_evidence
 
 
 @dataclass
@@ -22,6 +23,11 @@ class CommandInjectionPoint:
     payload: str
     evidence: str
     os_type: str = "unknown"
+    test_url: str = ""
+    status_code: int = 0
+    elapsed_ms: float = 0.0
+    matched_pattern: str = ""
+    response_snippet: str = ""
 
 
 # 命令注入Payload
@@ -124,6 +130,18 @@ class CommandInjectionScanner(BaseModule):
         # 生成结果
         results = []
         for vuln in self.vuln_points:
+            raw_data = {
+                "vulnerability_type": "command_injection",
+                "url": self.base_url,
+                "method": "GET",
+                "param": vuln.parameter,
+                "injection_point": vuln.parameter,
+                "payload": vuln.payload,
+                "command_type": vuln.injection_type,
+                "os_type": vuln.os_type,
+                "evidence": vuln.evidence,
+                "details": vuln.__dict__,
+            }
             result = ScanResult(
                 result_type=ResultType.VULNERABILITY,
                 title=f"命令注入漏洞: {vuln.parameter}",
@@ -131,7 +149,7 @@ class CommandInjectionScanner(BaseModule):
                 severity=Severity.CRITICAL,
                 target=self.base_url,
                 evidence=f"参数: {vuln.parameter}\nPayload: {vuln.payload}\n证据: {vuln.evidence}\n系统: {vuln.os_type}",
-                raw_data=vuln.__dict__
+                raw_data=raw_data
             )
             results.append(result)
             self.add_result(result)
@@ -175,58 +193,54 @@ class CommandInjectionScanner(BaseModule):
         
         async def test_param(param_name: str, original_value: str) -> Optional[CommandInjectionPoint]:
             async with semaphore:
-                for payload, payload_type in self.payloads:
-                    test_key = f"{param_name}:{payload[:20]}"
-                    if test_key in tested:
-                        continue
-                    tested.add(test_key)
-                    
-                    test_params = params.copy()
-                    test_params[param_name] = original_value + payload
-                    test_url = self._build_url(test_params)
-                    
-                    try:
-                        import time
-                        start_time = time.time()
+                baseline_params = params.copy()
+                baseline_params[param_name] = original_value
+                baseline_url = self._build_url(baseline_params)
+
+                async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+                    baseline_ev = await fetch_evidence(session, baseline_url, method="GET", allow_redirects=False, timeout=timeout, body_limit=800)
+
+                    for payload, payload_type in self.payloads:
+                        test_key = f"{param_name}:{payload[:20]}"
+                        if test_key in tested:
+                            continue
+                        tested.add(test_key)
                         
-                        async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
-                            async with session.get(test_url) as response:
-                                content = await response.text()
-                                elapsed = time.time() - start_time
-                                
-                                # 时间盲注检测
-                                if "time" in payload_type and elapsed >= 4:
-                                    return CommandInjectionPoint(
-                                        parameter=param_name,
-                                        injection_type="time-based blind",
-                                        payload=payload,
-                                        evidence=f"响应时间: {elapsed:.2f}秒",
-                                        os_type="unix" if "unix" in payload_type else "windows"
-                                    )
-                                
-                                # 响应特征检测
-                                for pattern, os_type in CMD_INDICATORS:
-                                    if re.search(pattern, content, re.IGNORECASE):
-                                        return CommandInjectionPoint(
-                                            parameter=param_name,
-                                            injection_type="command execution",
-                                            payload=payload,
-                                            evidence=f"匹配模式: {pattern}",
-                                            os_type=os_type
-                                        )
-                                        
-                    except asyncio.TimeoutError:
-                        # 超时可能是命令执行
-                        if "time" in payload_type:
+                        test_params = params.copy()
+                        test_params[param_name] = original_value + payload
+                        test_url = self._build_url(test_params)
+
+                        exploit_ev = await fetch_evidence(session, test_url, method="GET", allow_redirects=False, timeout=timeout, body_limit=800)
+                        comp = compare_evidence(baseline_ev, exploit_ev)
+                        content = exploit_ev.get("body_snippet", "")
+
+                        if "time" in payload_type and comp.get("elapsed_ms_delta", 0) >= 4000:
                             return CommandInjectionPoint(
                                 parameter=param_name,
                                 injection_type="time-based blind",
                                 payload=payload,
-                                evidence="请求超时",
-                                os_type="unix" if "unix" in payload_type else "windows"
+                                evidence=f"耗时差异明显: +{comp.get('elapsed_ms_delta')}ms",
+                                os_type="unix" if "unix" in payload_type else "windows",
+                                test_url=test_url,
+                                status_code=exploit_ev.get("status") or 0,
+                                elapsed_ms=float(exploit_ev.get("elapsed_ms") or 0.0),
+                                response_snippet=content
                             )
-                    except Exception:
-                        pass
+
+                        for pattern, os_type in CMD_INDICATORS:
+                            if re.search(pattern, content, re.IGNORECASE):
+                                return CommandInjectionPoint(
+                                    parameter=param_name,
+                                    injection_type="command execution",
+                                    payload=payload,
+                                    evidence=f"命中回显特征: {pattern}",
+                                    os_type=os_type,
+                                    test_url=test_url,
+                                    status_code=exploit_ev.get("status") or 0,
+                                    elapsed_ms=float(exploit_ev.get("elapsed_ms") or 0.0),
+                                    matched_pattern=pattern,
+                                    response_snippet=content
+                                )
                 
                 return None
         

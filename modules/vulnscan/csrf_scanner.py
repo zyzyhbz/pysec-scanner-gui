@@ -23,6 +23,8 @@ class CSRFVulnerability:
     missing_token: bool
     missing_referer_check: bool
     description: str
+    inputs: List[str] = None
+    form_html_snippet: str = ""
 
 
 class CSRFScanner(BaseModule):
@@ -82,6 +84,18 @@ class CSRFScanner(BaseModule):
         # 生成结果
         results = []
         for vuln in self.vulnerabilities:
+            raw_data = {
+                "vulnerability_type": "csrf",
+                "url": vuln.form_url,
+                "method": vuln.method,
+                "form_action": vuln.form_action,
+                "missing_token": vuln.missing_token,
+                "missing_referer_check": vuln.missing_referer_check,
+                "inputs": vuln.inputs or [],
+                "form_html_snippet": vuln.form_html_snippet,
+                "evidence": vuln.description,
+                "details": vuln.__dict__,
+            }
             result = ScanResult(
                 result_type=ResultType.VULNERABILITY,
                 title=f"CSRF漏洞: {vuln.form_action}",
@@ -93,7 +107,7 @@ class CSRFScanner(BaseModule):
                         f"方法: {vuln.method}\n"
                         f"缺少Token: {vuln.missing_token}\n"
                         f"缺少Referer检查: {vuln.missing_referer_check}",
-                raw_data=vuln.__dict__
+                raw_data=raw_data
             )
             results.append(result)
             self.add_result(result)
@@ -149,7 +163,8 @@ class CSRFScanner(BaseModule):
                             'action': action,
                             'method': method,
                             'inputs': inputs,
-                            'html': form_html
+                            'html': form_html,
+                            'html_snippet': form_html[:600]
                         })
                         
         except Exception as e:
@@ -183,7 +198,9 @@ class CSRFScanner(BaseModule):
                 method=form['method'],
                 missing_token=True,
                 missing_referer_check=True,  # 假设没有Referer检查
-                description=f"表单 {form['action']} 缺少CSRF Token保护，攻击者可以伪造用户请求"
+                description=f"表单 {form['action']} 缺少CSRF Token保护，攻击者可以伪造用户请求",
+                inputs=form.get("inputs") or [],
+                form_html_snippet=form.get("html_snippet", "")
             )
         
         return None

@@ -13,6 +13,7 @@ from core.config import Config
 from core.scanner import Scanner, create_scanner
 from core.logger import Logger, logger
 from core.database import db
+from utils.rich_formatter import RichFormatter, rich_formatter
 
 
 @click.group()
@@ -32,10 +33,9 @@ def cli():
     """
     pass
 
-
 @cli.command()
 @click.argument('target')
-@click.option('--modules', '-m', multiple=True, 
+@click.option('--modules', '-m', multiple=True,
               help='指定模块 (port_scan, subdomain, dir_scan, sqli, xss, ssrf, csrf, xxe, lfi, cmdi, sensitive, poc, fingerprint)')
 @click.option('--output', '-o', default='outputs/report.html',
               help='报告输出路径')
@@ -52,9 +52,11 @@ def cli():
               help='代理地址 (如 http://127.0.0.1:8080)')
 @click.option('--save-db', is_flag=True, default=False,
               help='保存结果到数据库')
-def scan(target: str, modules: tuple, output: str, report_format: str, 
+@click.option('--no-rich', is_flag=True, default=False,
+              help='禁用 Rich 彩色输出')
+def scan(target: str, modules: tuple, output: str, report_format: str,
          config_file: Optional[str], timeout: int, concurrency: int,
-         proxy: str, save_db: bool):
+         proxy: str, save_db: bool, no_rich: bool):
     """
     执行完整扫描
     
@@ -72,19 +74,24 @@ def scan(target: str, modules: tuple, output: str, report_format: str,
     module_list = list(modules) if modules else None
     
     async def run():
-        report = await scanner.scan(target, module_list)
+        report = await scanner.scan(target, module_list, show_progress=not no_rich)
         scanner.save_results(report, output, report_format)
         
         if save_db:
             scan_id = db.create_scan(target, module_list or [])
             for result in report.results:
                 db.add_finding(scan_id, result.to_dict())
-            db.update_scan(scan_id, status="completed", 
+            db.update_scan(scan_id, status="completed",
                           total_findings=len(report.results))
             logger.success(f"结果已保存到数据库，扫描ID: {scan_id}")
         
+        # 使用 Rich 输出扫描结果（如果启用）
+        if not no_rich and report.results:
+            rich_formatter.print_scan_complete(report)
+        
         return report
     
+    asyncio.run(run())
     asyncio.run(run())
 
 

@@ -21,6 +21,9 @@ class SensitiveInfo:
     location: str
     severity: Severity
     description: str
+    matched_pattern: str = ""
+    response_snippet: str = ""
+    status_code: int = 0
 
 
 # 敏感信息正则模式
@@ -168,6 +171,18 @@ class SensitiveInfoScanner(BaseModule):
         # 生成结果
         results = []
         for finding in self.findings:
+            raw_data = {
+                "vulnerability_type": "sensitive_info",
+                "url": finding.location,
+                "method": "GET",
+                "sensitive_type": finding.info_type,
+                "matched_content": finding.content,
+                "matched_pattern": finding.matched_pattern,
+                "status_code": finding.status_code,
+                "response_snippet": finding.response_snippet,
+                "location": finding.location,
+                "evidence": finding.description,
+            }
             result = ScanResult(
                 result_type=ResultType.INFO,
                 title=f"敏感信息: {finding.info_type}",
@@ -175,11 +190,7 @@ class SensitiveInfoScanner(BaseModule):
                 severity=finding.severity,
                 target=finding.location,
                 evidence=f"类型: {finding.info_type}\n内容: {finding.content[:100]}...",
-                raw_data={
-                    'type': finding.info_type,
-                    'content': finding.content,
-                    'location': finding.location
-                }
+                raw_data=raw_data
             )
             results.append(result)
             self.add_result(result)
@@ -212,6 +223,8 @@ class SensitiveInfoScanner(BaseModule):
             async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
                 async with session.get(url) as response:
                     content = await response.text()
+                    snippet = content[:800]
+                    status_code = response.status
                     
                     # 检查每个模式
                     for info_type, pattern, severity in self.patterns:
@@ -225,7 +238,10 @@ class SensitiveInfoScanner(BaseModule):
                                     content=matched_content,
                                     location=url,
                                     severity=severity,
-                                    description=f"在页面中发现{info_type}"
+                                    description=f"在页面中发现{info_type}",
+                                    matched_pattern=pattern,
+                                    response_snippet=snippet,
+                                    status_code=status_code
                                 ))
                                 self.logger.highlight(f"发现: {info_type}")
                                 
@@ -252,6 +268,7 @@ class SensitiveInfoScanner(BaseModule):
                             if response.status == 200:
                                 content = await response.text()
                                 content_length = len(content)
+                                snippet = content[:800]
                                 
                                 # 检查是否是有效内容（不是404页面）
                                 if content_length > 0 and "not found" not in content.lower():
@@ -260,7 +277,10 @@ class SensitiveInfoScanner(BaseModule):
                                         content=f"文件可访问，大小: {content_length} bytes",
                                         location=url,
                                         severity=Severity.MEDIUM,
-                                        description=f"敏感文件 {path} 可直接访问"
+                                        description=f"敏感文件 {path} 可直接访问",
+                                        matched_pattern="path_probe",
+                                        response_snippet=snippet,
+                                        status_code=response.status
                                     )
                                     
                 except Exception:
